@@ -4,6 +4,7 @@ import os
 from tqdm import tqdm
 from einops import rearrange
 from models.dynamics import DynamicsModel
+from models.cosmos_tokenizer_adapter import CosmosTokenizerAdapter, CosmosVideoShape
 from datasets.data_utils import visualize_reconstruction, load_data_and_data_loaders
 from tqdm import tqdm
 from einops import rearrange
@@ -26,6 +27,21 @@ from dataclasses import asdict
 from utils.distributed import init_distributed_from_env, prepare_model_for_distributed, unwrap_model, print_param_count_if_main, cleanup_distributed
 from torch.distributed.fsdp import FSDPModule
 
+
+def aggregate_actions_for_token_steps(actions, token_steps, temporal_compression):
+    # actions: [B, F - 1, A], returns [B, token_steps - 1, A]
+    if actions is None or token_steps <= 1:
+        return None
+    chunks = []
+    for step in range(1, token_steps):
+        start = (step - 1) * temporal_compression
+        end = min(step * temporal_compression, actions.shape[1])
+        if start >= actions.shape[1]:
+            chunks.append(actions[:, -1])
+        else:
+            chunks.append(actions[:, start:end].mean(dim=1))
+    return torch.stack(chunks, dim=1)
+
 def main():
     # dynamics config merged with training_config.yaml (training takes priority), plus CLI overrides
     args: DynamicsConfig = load_stage_config_merged(DynamicsConfig, default_config_path=os.path.join(os.getcwd(), 'configs', 'dynamics.yaml'))
@@ -42,8 +58,21 @@ def main():
         print(f"Dynamics Training")
         print(f"Results will be saved in {stage_dir}")
 
-    # load video tokenizer and latent action model
-    if os.path.isdir(args.video_tokenizer_path):
+    tokenizer_backend = getattr(args, 'tokenizer_backend', 'fsq')
+    video_tokenizer = None
+    cosmos_tokenizer = None
+
+    # load video tokenizer and optional latent action model
+    if tokenizer_backend == 'cosmos':
+        cosmos_tokenizer = CosmosTokenizerAdapter(
+            model_name=args.cosmos_model,
+            checkpoint_dir=args.cosmos_checkpoint_dir,
+            device=args.device,
+            temporal_compression=args.cosmos_temporal_compression,
+            spatial_compression=args.cosmos_spatial_compression,
+            codebook_size=args.cosmos_codebook_size,
+        )
+    elif os.path.isdir(args.video_tokenizer_path):
         video_tokenizer, vq_ckpt = load_videotokenizer_from_checkpoint(
             checkpoint_path=args.video_tokenizer_path, 
             device=args.device, 
@@ -54,7 +83,8 @@ def main():
             p.requires_grad = False
     else:
         raise FileNotFoundError(f"Video tokenizer checkpoint not found at {args.video_tokenizer_path}")
-    if os.path.isdir(args.latent_actions_path):
+    latent_action_model = None
+    if args.use_actions and os.path.isdir(args.latent_actions_path):
         latent_action_model, latent_action_ckpt = load_latent_actions_from_checkpoint(
             checkpoint_path=args.latent_actions_path, 
             device=args.device,
@@ -63,10 +93,11 @@ def main():
         unwrap_model(latent_action_model).eval()
         for p in unwrap_model(latent_action_model).parameters():
             p.requires_grad = False
-    else:
+    elif args.use_actions:
         raise FileNotFoundError(f"Latent Action Model checkpoint not found at {args.latent_actions_path}")
 
     # init dynamics model and optional ckpt load
+    conditioning_dim = unwrap_model(latent_action_model).action_dim if latent_action_model is not None else 3
     dynamics_model = DynamicsModel(
         frame_size=(args.frame_size, args.frame_size),
         patch_size=args.patch_size,
@@ -74,13 +105,15 @@ def main():
         num_heads=args.num_heads,
         hidden_dim=args.hidden_dim,
         num_blocks=args.num_blocks,
-        conditioning_dim=unwrap_model(latent_action_model).action_dim,
+        conditioning_dim=conditioning_dim,
         latent_dim=args.latent_dim,
         num_bins=args.num_bins,
         use_moe=getattr(args, 'use_moe', False),
         num_experts=getattr(args, 'num_experts', 4),
         top_k_experts=getattr(args, 'top_k_experts', 2),
         moe_aux_loss_coeff=getattr(args, 'moe_aux_loss_coeff', 0.01),
+        input_mode=getattr(args, 'input_mode', 'fsq_latents'),
+        discrete_codebook_size=getattr(args, 'cosmos_codebook_size', 65536),
     ).to(args.device)
     if args.checkpoint:
         dynamics_model, _ = load_dynamics_from_checkpoint(
@@ -93,8 +126,10 @@ def main():
     # optional DDP, compile, param count, tf32
     print_param_count_if_main(dynamics_model, "DynamicsModel", is_main)
     if args.compile:
-        video_tokenizer = torch.compile(video_tokenizer, mode="reduce-overhead", fullgraph=False, dynamic=True)
-        latent_action_model = torch.compile(latent_action_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
+        if video_tokenizer is not None:
+            video_tokenizer = torch.compile(video_tokenizer, mode="reduce-overhead", fullgraph=False, dynamic=True)
+        if latent_action_model is not None:
+            latent_action_model = torch.compile(latent_action_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         dynamics_model = torch.compile(dynamics_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         print("Compiled all models for training.")
     dynamics_model = prepare_model_for_distributed(
@@ -134,6 +169,8 @@ def main():
         data_overrides['fps'] = args.fps
     if hasattr(args, 'preload_ratio') and args.preload_ratio is not None:
         data_overrides['preload_ratio'] = args.preload_ratio
+    if tokenizer_backend == 'cosmos':
+        data_overrides['resolution'] = (args.frame_size, args.frame_size)
     _, _, training_loader, _, _ = load_data_and_data_loaders(
         dataset=args.dataset, 
         batch_size=args.batch_size_per_gpu,
@@ -164,10 +201,21 @@ def main():
             x = x.to(args.device, non_blocking=True)  # [batch_size, seq_len, channels, height, width]
 
             # get video tokens for batch
-            video_tokens = video_tokenizer.tokenize(x) # [B, T, P]
-            video_latents = video_tokenizer.quantizer.get_latents_from_indices(video_tokens, dim=-1) # [B, T, P, L]
-            if args.use_actions:
-                quantized_actions = latent_action_model.encode(x)  # [B, T - 1, A]
+            if tokenizer_backend == 'cosmos':
+                video_tokens = cosmos_tokenizer.tokenize(x) # [B, Tz, P]
+                video_latents = video_tokens
+            else:
+                video_tokens = video_tokenizer.tokenize(x) # [B, T, P]
+                video_latents = video_tokenizer.quantizer.get_latents_from_indices(video_tokens, dim=-1) # [B, T, P, L]
+
+            if args.use_actions and latent_action_model is not None:
+                raw_actions = latent_action_model.encode(x)  # [B, F - 1, A]
+                if tokenizer_backend == 'cosmos':
+                    quantized_actions = aggregate_actions_for_token_steps(
+                        raw_actions, video_tokens.shape[1], args.cosmos_temporal_compression
+                    )
+                else:
+                    quantized_actions = raw_actions
             else:
                 quantized_actions = None
 
@@ -214,33 +262,37 @@ def main():
             wandb.log(log_dict, step=i)
             log_system_metrics(i)
             log_learning_rate(optimizers[0], i)
-            if args.use_actions:
+            if args.use_actions and latent_action_model is not None and quantized_actions is not None:
                 action_indices = latent_action_model.quantizer.get_indices_from_latents(quantized_actions)
                 log_action_distribution(action_indices, i, args.n_actions)
 
         # save model and visualize results
         if i % args.log_interval == 0:
-            if args.use_wandb:
-                predicted_next_indices = torch.argmax(predicted_next_logits, dim=-1)
-                predicted_next_latents = video_tokenizer.quantizer.get_latents_from_indices(predicted_next_indices, dim=-1)
-                with torch.no_grad():
+            predicted_next_indices = torch.argmax(predicted_next_logits, dim=-1)
+            with torch.no_grad():
+                if tokenizer_backend == 'cosmos':
+                    output_shape = CosmosVideoShape(frames=x.shape[1], height=x.shape[-2], width=x.shape[-1])
+                    predicted_frames = cosmos_tokenizer.detokenize(predicted_next_indices[:16], output_shape=output_shape)
+                    masked_frames = x[:16]
+                else:
+                    predicted_next_latents = video_tokenizer.quantizer.get_latents_from_indices(predicted_next_indices, dim=-1)
                     predicted_frames = video_tokenizer.decoder(predicted_next_latents[:16]) # [B, T, C, H, W]
 
-                # convert mask_positions to patch-level mask for visualization
-                B, T, P = mask_positions.shape
-                patch_size = args.patch_size
-                H, W = args.frame_size, args.frame_size
-                pixel_mask = torch.zeros(B, T, H, W, device=mask_positions.device)
-                # for each pixel patch, mask if equivalent token is masked
-                for b in range(B):
-                    for t in range(T):
-                        for p in range(P):
-                            if mask_positions[b, t, p]:
-                                patch_row = (p // (W // patch_size)) * patch_size
-                                patch_col = (p % (W // patch_size)) * patch_size
-                                pixel_mask[b, t, patch_row:patch_row+patch_size, patch_col:patch_col+patch_size] = 1 # assigning 1 to the patch in the mask of dim [1, 1, Hp, Wp]
-                pixel_mask_expanded = rearrange(pixel_mask, 'b t h w -> b t 1 h w')
-                masked_frames = x * (1 - pixel_mask_expanded)
+                    # convert mask_positions to patch-level mask for visualization
+                    B, T, P = mask_positions.shape
+                    patch_size = args.patch_size
+                    H, W = args.frame_size, args.frame_size
+                    pixel_mask = torch.zeros(B, T, H, W, device=mask_positions.device)
+                    # for each pixel patch, mask if equivalent token is masked
+                    for b in range(B):
+                        for t in range(T):
+                            for p in range(P):
+                                if mask_positions[b, t, p]:
+                                    patch_row = (p // (W // patch_size)) * patch_size
+                                    patch_col = (p % (W // patch_size)) * patch_size
+                                    pixel_mask[b, t, patch_row:patch_row+patch_size, patch_col:patch_col+patch_size] = 1 # assigning 1 to the patch in the mask of dim [1, 1, Hp, Wp]
+                    pixel_mask_expanded = rearrange(pixel_mask, 'b t h w -> b t 1 h w')
+                    masked_frames = x * (1 - pixel_mask_expanded)
             
             hyperparameters = args.__dict__
             ckpt_path = save_training_state(dynamics_model, optimizers[0], schedulers[0], hyperparameters, checkpoints_dir, prefix='dynamics', step=i)

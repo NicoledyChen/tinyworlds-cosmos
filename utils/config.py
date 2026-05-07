@@ -221,6 +221,13 @@ class DynamicsConfig:
 	# other params
 	fps: Optional[int] = None
 	preload_ratio: Optional[float] = None
+	tokenizer_backend: str = "fsq"
+	input_mode: str = "fsq_latents"
+	cosmos_model: str = "nvidia/Cosmos-0.1-Tokenizer-DV8x8x8"
+	cosmos_checkpoint_dir: Optional[str] = None
+	cosmos_codebook_size: int = 65536
+	cosmos_temporal_compression: int = 8
+	cosmos_spatial_compression: int = 8
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -281,6 +288,13 @@ class TrainingConfig:
 	optimizer: str = "adamw"
 	muon_momentum: float = 0.95
 	muon_backend_steps: int = 5
+	tokenizer_backend: str = "fsq"
+	input_mode: str = "fsq_latents"
+	cosmos_model: str = "nvidia/Cosmos-0.1-Tokenizer-DV8x8x8"
+	cosmos_checkpoint_dir: Optional[str] = None
+	cosmos_codebook_size: int = 65536
+	cosmos_temporal_compression: int = 8
+	cosmos_spatial_compression: int = 8
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -311,6 +325,13 @@ class InferenceConfig:
 	# Interactive mode (user enters action ids)
 	use_interactive_mode: bool
 	preload_ratio: Optional[float] = None
+	tokenizer_backend: str = "fsq"
+	input_mode: str = "fsq_latents"
+	cosmos_model: str = "nvidia/Cosmos-0.1-Tokenizer-DV8x8x8"
+	cosmos_checkpoint_dir: Optional[str] = None
+	cosmos_codebook_size: int = 65536
+	cosmos_temporal_compression: int = 8
+	cosmos_spatial_compression: int = 8
 
 
 def load_config(config_cls, default_config_path: Optional[str] = None):

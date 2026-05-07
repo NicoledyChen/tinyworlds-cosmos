@@ -3,6 +3,13 @@ video_tokenizer_path:
 latent_actions_path: 
 dynamics_path: 
 use_latest_checkpoints: true
+tokenizer_backend: cosmos
+input_mode: token_indices
+cosmos_model: nvidia/Cosmos-0.1-Tokenizer-DV8x8x8
+cosmos_checkpoint_dir:
+cosmos_codebook_size: 65536
+cosmos_temporal_compression: 8
+cosmos_spatial_compression: 8
 
 # inference params
 dataset: PONG
@@ -18,7 +25,7 @@ prediction_horizon: 1 # how many masked frames to append and decode at a time
 # action selection modes (lower takes priority)
 use_actions: false # use random actions
 use_gt_actions: false # use lam-inferred actions
-use_interactive_mode: true # use user-inputted actions
+use_interactive_mode: false # use user-inputted actions
 
 # inference acceleration
 amp: false

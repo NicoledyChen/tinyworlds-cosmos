@@ -50,25 +50,28 @@ def main():
         if not run_command(latent_actions_cmd, "Latent Actions Training"):
             return
 
-    # need to get above checkpoints and pass in to dynamics
-    video_tokenizer_checkpoint = find_latest_checkpoint(".", "video_tokenizer")
-    latent_actions_checkpoint = find_latest_checkpoint(".", "latent_actions")
+    # need to get above checkpoints and pass in to dynamics unless using Cosmos tokenizer
+    use_cosmos = getattr(train_config, 'tokenizer_backend', 'fsq') == 'cosmos'
+    video_tokenizer_checkpoint = None if use_cosmos else find_latest_checkpoint(".", "video_tokenizer")
+    latent_actions_checkpoint = None if use_cosmos or not getattr(train_config, 'use_actions', False) else find_latest_checkpoint(".", "latent_actions")
 
     if train_config.run_dynamics:
         dyn_cmd = launcher + [
             "scripts/train_dynamics.py",
             "--config", train_config.dynamics_config,
             "--training_config", training_cfg_path,
-            f"video_tokenizer_path={video_tokenizer_checkpoint}",
-            f"latent_actions_path={latent_actions_checkpoint}",
         ]
+        if video_tokenizer_checkpoint is not None:
+            dyn_cmd.append(f"video_tokenizer_path={video_tokenizer_checkpoint}")
+        if latent_actions_checkpoint is not None:
+            dyn_cmd.append(f"latent_actions_path={latent_actions_checkpoint}")
         if not run_command(dyn_cmd, "Dynamics Model Training"):
             return
 
     dynamics_checkpoint = find_latest_checkpoint(".", "dynamics")
     print("\n📁 Results Summary:")
-    print(f"Video Tokenizer: {video_tokenizer_checkpoint}")
-    print(f"Latent Actions: {latent_actions_checkpoint}")
+    print(f"Video Tokenizer: {video_tokenizer_checkpoint or 'Cosmos'}")
+    print(f"Latent Actions: {latent_actions_checkpoint or 'disabled'}")
     print(f"Dynamics Model: {dynamics_checkpoint}")
 
 

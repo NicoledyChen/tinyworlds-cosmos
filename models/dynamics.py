@@ -9,12 +9,29 @@ from einops import repeat
 class DynamicsModel(nn.Module):
     def __init__(self, frame_size=(128, 128), patch_size=4, embed_dim=128, num_heads=8,
                  hidden_dim=128, num_blocks=4, num_bins=4, n_actions=8, conditioning_dim=3, latent_dim=5,
-                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01):
+                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01,
+                 input_mode="fsq_latents", discrete_codebook_size=65536):
         super().__init__()
         H, W = frame_size
-        codebook_size = num_bins**latent_dim
+        self.input_mode = input_mode
+        self.latent_dim = latent_dim
+        self.discrete_codebook_size = discrete_codebook_size
+        if input_mode == "fsq_latents":
+            codebook_size = num_bins**latent_dim
+            self.latent_embed = nn.Linear(latent_dim, embed_dim)
+            self.token_embed = None
+            self.mask_token = nn.Parameter(torch.randn(1, 1, 1, latent_dim) * 0.02)  # [1, 1, 1, L]
+            self.mask_embedding = None
+        elif input_mode == "token_indices":
+            # Cosmos discrete indices are documented as [1..64K], so class 0 is unused.
+            codebook_size = discrete_codebook_size + 1
+            self.latent_embed = None
+            self.token_embed = nn.Embedding(codebook_size, embed_dim)
+            self.mask_token = None
+            self.mask_embedding = nn.Parameter(torch.randn(1, 1, 1, embed_dim) * 0.02)
+        else:
+            raise ValueError(f"Unsupported dynamics input_mode: {input_mode}")
 
-        self.latent_embed = nn.Linear(latent_dim, embed_dim)
         self.transformer = STTransformer(
             embed_dim, num_heads, hidden_dim, num_blocks, causal=True,
             conditioning_dim=conditioning_dim,
@@ -27,37 +44,41 @@ class DynamicsModel(nn.Module):
         pe_spatial = build_spatial_only_pe((H, W), patch_size, embed_dim, device='cpu', dtype=torch.float32)  # [1,P,E]
         self.register_buffer("pos_spatial_dec", pe_spatial, persistent=False)
 
-        # learnable mask token latent
-        # TODO; try leanable mask embedding in embed space instead of latent space
-        self.mask_token = nn.Parameter(torch.randn(1, 1, 1, latent_dim) * 0.02)  # [1, 1, 1, L]
-
     def forward(self, discrete_latents, training=True, conditioning=None, targets=None):
-        # discrete_latents: [B, T, P, L]
+        # fsq mode discrete_latents: [B, T, P, L]
+        # token-index mode discrete_latents: [B, T, P]
         # targets: [B, T, P] indices
         # conditioning: [B, T, A]
-        B, T, P, L = discrete_latents.shape
+        if self.input_mode == "fsq_latents":
+            B, T, P, L = discrete_latents.shape
+            discrete_latents = discrete_latents.to(dtype=torch.float32)
 
-        # convert latents to float for embedding
-        discrete_latents = discrete_latents.to(dtype=torch.float32)
+            if training and self.training:
+                mask_positions = self._sample_mask_positions(B, T, P, discrete_latents.device)
+                mask_token = repeat(self.mask_token.to(discrete_latents.device, discrete_latents.dtype), '1 1 1 L -> B T P L', B=B, T=T, P=P) # [B, T, P, L]
+                discrete_latents = torch.where(mask_positions.unsqueeze(-1), mask_token, discrete_latents) # [B, T, P, L]
+            else:
+                mask_positions = None
 
-        # apply MaskGIT random masking during training
-        if training and self.training:
-            # per-batch mask ratio in [0.5, 1.0)
-            mask_ratio = 0.5 + torch.rand((), device=discrete_latents.device) * 0.5 
-            mask_positions = (torch.rand(B, T, P, device=discrete_latents.device) < mask_ratio) # [B, T, P]
+            embeddings = self.latent_embed(discrete_latents)  # [B, T, P, E]
+        elif self.input_mode == "token_indices":
+            B, T, P = discrete_latents.shape
+            token_indices = discrete_latents.long().clamp_min(0).clamp_max(self.discrete_codebook_size)
+            explicit_mask_positions = token_indices == 0
+            if training and self.training:
+                mask_positions = self._sample_mask_positions(B, T, P, token_indices.device)
+            else:
+                mask_positions = None
 
-            # guarantee at least one unmasked temporal anchor per (B, P)
-            # pick a random timestep for each (B,P) and force it to unmask
-            anchor_idx = torch.randint(0, T, (B, P), device=discrete_latents.device)  # [B, P]
-            mask_positions[torch.arange(B)[:, None], anchor_idx, torch.arange(P)[None, :]] = False # [B, T, P]
-
-            # replace selected latents with mask tokens
-            mask_token = repeat(self.mask_token.to(discrete_latents.device, discrete_latents.dtype), '1 1 1 L -> B T P L', B=B, T=T, P=P) # [B, T, P, L]
-            discrete_latents = torch.where(mask_positions.unsqueeze(-1), mask_token, discrete_latents) # [B, T, P, L]
+            embeddings = self.token_embed(token_indices)  # [B, T, P, E]
+            active_mask_positions = mask_positions
+            if active_mask_positions is None and explicit_mask_positions.any():
+                active_mask_positions = explicit_mask_positions
+            if active_mask_positions is not None:
+                mask_embedding = repeat(self.mask_embedding.to(embeddings.device, embeddings.dtype), '1 1 1 E -> B T P E', B=B, T=T, P=P)
+                embeddings = torch.where(active_mask_positions.unsqueeze(-1), mask_embedding, embeddings)
         else:
-            mask_positions = None
-
-        embeddings = self.latent_embed(discrete_latents)  # [B, T, P, E]
+            raise ValueError(f"Unsupported dynamics input_mode: {self.input_mode}")
 
         # add spatial PE (affects only first 2/3 of dimensions)
         # STTransformer adds temporal PE to last 1/3 of dimensions
@@ -81,6 +102,16 @@ class DynamicsModel(nn.Module):
 
         return predicted_logits, mask_positions, loss  # logits, mask, optional loss
 
+    def _sample_mask_positions(self, B, T, P, device):
+        # per-batch mask ratio in [0.5, 1.0)
+        mask_ratio = 0.5 + torch.rand((), device=device) * 0.5
+        mask_positions = (torch.rand(B, T, P, device=device) < mask_ratio) # [B, T, P]
+
+        # guarantee at least one unmasked temporal anchor per (B, P)
+        anchor_idx = torch.randint(0, T, (B, P), device=device)  # [B, P]
+        mask_positions[torch.arange(B, device=device)[:, None], anchor_idx, torch.arange(P, device=device)[None, :]] = False # [B, T, P]
+        return mask_positions
+
     def exp_schedule_torch(self, t, T, P_total, k, device):
         # t: current step, T: total steps, P_total: total masked positions across the horizon window
         # exp schedule is P_total * (1 - exp(k * t / T)) / (1 - exp(k))
@@ -90,6 +121,86 @@ class DynamicsModel(nn.Module):
         if t == T - 1:
             return torch.tensor(P_total, dtype=result.dtype, device=device)
         return result
+
+    @torch.no_grad()
+    def forward_inference_indices(self, context_indices, prediction_horizon, num_steps, conditioning=None, schedule_k=5.0, temperature: float = 0.0):
+        if self.input_mode != "token_indices":
+            raise ValueError("forward_inference_indices requires input_mode='token_indices'")
+
+        device = context_indices.device
+        B, T_ctx, P = context_indices.shape
+        H = int(prediction_horizon)
+
+        masked_indices = torch.zeros(B, H, P, dtype=torch.long, device=device)
+        input_indices = torch.cat([context_indices.long(), masked_indices], dim=1)  # [B, T_ctx+H, P]
+        mask = torch.ones(B, H, P, dtype=torch.bool, device=device)
+
+        P_total = H * P
+        for m in range(num_steps):
+            n_tokens_raw = self.exp_schedule_torch(m, num_steps, P_total, schedule_k, device)
+            logits, _, _ = self.forward(input_indices, training=False, conditioning=conditioning, targets=None)
+            scaled_logits = logits / float(temperature) if temperature and temperature > 0 else logits
+            scaled_logits[..., 0] = -torch.inf
+            probs = torch.softmax(scaled_logits, dim=-1)
+            max_probs, _ = torch.max(probs, dim=-1)
+            if temperature and temperature > 0:
+                Bc, Tc, Pc, vocab = probs.shape
+                sampled = torch.distributions.Categorical(probs=probs.reshape(-1, vocab)).sample()
+                predicted_indices = sampled.view(Bc, Tc, Pc)
+            else:
+                _, predicted_indices = torch.max(probs, dim=-1)
+
+            horizon_probs = max_probs[:, -H:, :]
+            for b in range(B):
+                masked_flat_idx = torch.where(mask[b].reshape(-1))[0]
+                if masked_flat_idx.numel() == 0:
+                    continue
+
+                num_masked_b = int(masked_flat_idx.numel())
+                prev_b = P_total - num_masked_b
+                target_unmasked = int(torch.ceil(n_tokens_raw).item())
+                k_floor = max(P_total // 16, 1)
+                k_b = max(k_floor, min(max(target_unmasked - prev_b, 0), num_masked_b))
+
+                pos_probs_flat = horizon_probs[b].contiguous().view(-1)[masked_flat_idx]
+                if pos_probs_flat.numel() > k_b:
+                    top_idx = torch.topk(pos_probs_flat, k_b, largest=True).indices
+                    selected = masked_flat_idx[top_idx]
+                else:
+                    selected = masked_flat_idx
+
+                h_sel = torch.div(selected, P, rounding_mode='floor')
+                p_sel = selected % P
+                if h_sel.numel() == 0:
+                    continue
+                unique_h = torch.unique(h_sel, sorted=True)
+                for uh in unique_h:
+                    mask_h = h_sel == uh
+                    p_list = p_sel[mask_h]
+                    t_abs = T_ctx + int(uh.item())
+                    input_indices[b, t_abs, p_list] = predicted_indices[b, t_abs, p_list]
+                    mask[b, int(uh.item()), p_list] = False
+
+            if not mask.any():
+                break
+
+        if mask.any():
+            logits, _, _ = self.forward(input_indices, training=False, conditioning=conditioning, targets=None)
+            logits[..., 0] = -torch.inf
+            predicted_indices = torch.argmax(logits, dim=-1)
+            for b in range(B):
+                h_idx, p_idx = torch.where(mask[b])
+                if h_idx.numel() == 0:
+                    continue
+                unique_h = torch.unique(h_idx, sorted=True)
+                for uh in unique_h:
+                    mask_h = h_idx == uh
+                    p_list = p_idx[mask_h]
+                    t_abs = T_ctx + int(uh.item())
+                    input_indices[b, t_abs, p_list] = predicted_indices[b, t_abs, p_list]
+                    mask[b, int(uh.item()), p_list] = False
+
+        return input_indices
 
     @torch.no_grad()
     def forward_inference(self, context_latents, prediction_horizon, num_steps, index_to_latents_fn, conditioning=None, schedule_k=5.0, temperature: float = 0.0):

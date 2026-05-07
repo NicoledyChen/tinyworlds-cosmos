@@ -9,6 +9,7 @@ import re
 from utils.utils import load_videotokenizer_from_checkpoint, load_latent_actions_from_checkpoint, load_dynamics_from_checkpoint, find_latest_checkpoint
 from utils.config import InferenceConfig, load_config
 from utils.inference_utils import load_models, visualize_inference, sample_random_action, get_action_latent
+from models.cosmos_tokenizer_adapter import CosmosTokenizerAdapter, CosmosVideoShape
 from einops import repeat
 from typing import Optional
 
@@ -22,8 +23,12 @@ def main():
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
 
+    tokenizer_backend = getattr(args, 'tokenizer_backend', 'fsq')
     # whether any setting requires using action tokens
     use_latent_actions = (args.use_actions or args.use_gt_actions or args.use_interactive_mode)
+    if tokenizer_backend == 'cosmos' and use_latent_actions:
+        print("[WARN] Cosmos inference currently ignores latent actions; set action flags false for controlled runs.")
+        use_latent_actions = False
 
     # check if any path is missing
     def missing(path: Optional[str]) -> bool:
@@ -31,7 +36,7 @@ def main():
 
     # resolve latest checkpoints if requested or any path missing
     base_dir = os.getcwd()
-    if args.use_latest_checkpoints or missing(args.video_tokenizer_path):
+    if tokenizer_backend != 'cosmos' and (args.use_latest_checkpoints or missing(args.video_tokenizer_path)):
         vt_ckpt = find_latest_checkpoint(base_dir, "video_tokenizer")
         args.video_tokenizer_path = vt_ckpt
     if (args.use_latest_checkpoints or missing(args.latent_actions_path)) and use_latent_actions:
@@ -42,13 +47,16 @@ def main():
         args.dynamics_path = dyn_ckpt
     
     # confirm which ckpts are being used
-    print(f"Using video_tokenizer checkpoint: {args.video_tokenizer_path}")
+    if tokenizer_backend != 'cosmos':
+        print(f"Using video_tokenizer checkpoint: {args.video_tokenizer_path}")
+    else:
+        print(f"Using Cosmos tokenizer: {args.cosmos_model}")
     if use_latent_actions:
         print(f"Using latent_actions checkpoint: {args.latent_actions_path}")
     print(f"Using dynamics checkpoint: {args.dynamics_path}")
 
     # validate required paths
-    if missing(args.video_tokenizer_path):
+    if tokenizer_backend != 'cosmos' and missing(args.video_tokenizer_path):
         raise FileNotFoundError("video_tokenizer_path is not set or not a file. Set it in configs/inference.yaml or enable use_latest_checkpoints with available runs.")
     if use_latent_actions and missing(args.latent_actions_path):
         raise FileNotFoundError("latent_actions_path is not set or not a file while actions are requested. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
@@ -56,16 +64,34 @@ def main():
         raise FileNotFoundError("dynamics_path is not set or not a file. Set it in configs/inference.yaml or enable use_latest_checkpoints.")
  
     # load models, optionally compile
-    video_tokenizer, latent_action_model, dynamics_model = load_models(args.video_tokenizer_path, args.latent_actions_path, args.dynamics_path, args.device, use_actions=use_latent_actions)
+    cosmos_tokenizer = None
+    if tokenizer_backend == 'cosmos':
+        video_tokenizer = None
+        latent_action_model = None
+        cosmos_tokenizer = CosmosTokenizerAdapter(
+            model_name=args.cosmos_model,
+            checkpoint_dir=args.cosmos_checkpoint_dir,
+            device=args.device,
+            temporal_compression=args.cosmos_temporal_compression,
+            spatial_compression=args.cosmos_spatial_compression,
+            codebook_size=args.cosmos_codebook_size,
+        )
+        dynamics_model, _ = load_dynamics_from_checkpoint(args.dynamics_path, args.device)
+    else:
+        video_tokenizer, latent_action_model, dynamics_model = load_models(args.video_tokenizer_path, args.latent_actions_path, args.dynamics_path, args.device, use_actions=use_latent_actions)
     if args.compile:
-        video_tokenizer = torch.compile(video_tokenizer, mode="reduce-overhead", fullgraph=False, dynamic=True)
+        if video_tokenizer is not None:
+            video_tokenizer = torch.compile(video_tokenizer, mode="reduce-overhead", fullgraph=False, dynamic=True)
         if use_latent_actions:
             latent_action_model = torch.compile(latent_action_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         dynamics_model = torch.compile(dynamics_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         print("Compiled all models for inference.")
 
     # determine how many ground-truth frames we need in each batch: context + generation steps + prediction horizon
-    frames_to_load = args.context_window + args.generation_steps * args.prediction_horizon
+    if tokenizer_backend == 'cosmos':
+        frames_to_load = args.context_window + args.generation_steps * args.prediction_horizon * args.cosmos_temporal_compression
+    else:
+        frames_to_load = args.context_window + args.generation_steps * args.prediction_horizon
 
     # dataloader
     if hasattr(args, 'preload_ratio') and args.preload_ratio is not None:
@@ -109,8 +135,12 @@ def main():
             context_frames = generated_frames[:, -args.context_window:, :, :, :]  # [1, context_window, C, H, W]
 
         # encode context frames each iteration
-        video_indices = video_tokenizer.tokenize(context_frames)
-        video_latents = video_tokenizer.quantizer.get_latents_from_indices(video_indices)
+        if tokenizer_backend == 'cosmos':
+            video_indices = cosmos_tokenizer.tokenize(context_frames)
+            video_latents = video_indices
+        else:
+            video_indices = video_tokenizer.tokenize(context_frames)
+            video_latents = video_tokenizer.quantizer.get_latents_from_indices(video_indices)
 
         sampled_action_index, action_latent = get_action_latent(args, inferred_actions, n_actions, context_frames, latent_action_model, i)
 
@@ -121,19 +151,36 @@ def main():
         # autocast for inference if amp enabled (bfloat16 on CUDA by default)
         autocast_dtype = torch.bfloat16 if args.amp else None
         with torch.amp.autocast('cuda', enabled=args.amp, dtype=autocast_dtype):
-            next_video_latents = dynamics_model.forward_inference(
-                context_latents=video_latents,
-                prediction_horizon=args.prediction_horizon,
-                num_steps=10,
-                index_to_latents_fn=idx_to_latents,
-                conditioning=action_latent,
-                temperature=args.temperature,
-            )
+            if tokenizer_backend == 'cosmos':
+                next_video_latents = dynamics_model.forward_inference_indices(
+                    context_indices=video_latents,
+                    prediction_horizon=args.prediction_horizon,
+                    num_steps=10,
+                    conditioning=action_latent,
+                    temperature=args.temperature,
+                )
+            else:
+                next_video_latents = dynamics_model.forward_inference(
+                    context_latents=video_latents,
+                    prediction_horizon=args.prediction_horizon,
+                    num_steps=10,
+                    index_to_latents_fn=idx_to_latents,
+                    conditioning=action_latent,
+                    temperature=args.temperature,
+                )
 
         # decode next video tokens to frames
-        next_frames = video_tokenizer.detokenize(next_video_latents)  # [1, T, C, H, W]
-
-        generated_frames = torch.cat([generated_frames, next_frames[:, -args.prediction_horizon:, :, :]], dim=1)
+        if tokenizer_backend == 'cosmos':
+            output_shape = CosmosVideoShape(
+                frames=context_frames.shape[1] + args.prediction_horizon * args.cosmos_temporal_compression,
+                height=context_frames.shape[-2],
+                width=context_frames.shape[-1],
+            )
+            next_frames = cosmos_tokenizer.detokenize(next_video_latents, output_shape=output_shape)
+            generated_frames = torch.cat([generated_frames, next_frames[:, context_frames.shape[1]:, :, :]], dim=1)
+        else:
+            next_frames = video_tokenizer.detokenize(next_video_latents)  # [1, T, C, H, W]
+            generated_frames = torch.cat([generated_frames, next_frames[:, -args.prediction_horizon:, :, :]], dim=1)
         # TODO: if using interactive mode, visualize next_frames[:, -1] (recently inferred frame) every time, probably with matplotlib is easiest
         # point is for user to be able to interact with it in real time
 

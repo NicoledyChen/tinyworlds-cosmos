@@ -7,12 +7,19 @@ dataset: PICODOOM
 preload_ratio: 0.005
 
 # shared model params
-patch_size: 4
-context_length: 4
-frame_size: 64
+patch_size: 8
+context_length: 9
+frame_size: 256
 latent_dim: 5 # for video tokenizer
 num_bins: 4 # for video tokenizer
 n_actions: 4
+tokenizer_backend: cosmos
+input_mode: token_indices
+cosmos_model: nvidia/Cosmos-0.1-Tokenizer-DV8x8x8
+cosmos_checkpoint_dir:
+cosmos_codebook_size: 65536
+cosmos_temporal_compression: 8
+cosmos_spatial_compression: 8
 
 # performance
 amp: true
@@ -33,8 +40,8 @@ latent_actions_config: configs/latent_actions.yaml
 dynamics_config: configs/dynamics.yaml
 
 # which stages to run
-run_video_tokenizer: true
-run_latent_actions: true
+run_video_tokenizer: false
+run_latent_actions: false
 run_dynamics: true
 
 # optimizer: "adamw" (default) or "muon" (Newton-Schulz orthogonalized)
