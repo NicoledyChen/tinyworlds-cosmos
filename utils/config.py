@@ -328,6 +328,7 @@ class InferenceConfig:
 	compile: bool
 	# Interactive mode (user enters action ids)
 	use_interactive_mode: bool
+	frame_size: int = 64
 	preload_ratio: Optional[float] = None
 	tokenizer_backend: str = "fsq"
 	input_mode: str = "fsq_latents"

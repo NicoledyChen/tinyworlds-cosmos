@@ -100,6 +100,8 @@ def main():
         data_overrides = {'preload_ratio': args.preload_ratio}
     else:
         data_overrides = {}
+    if tokenizer_backend == 'cosmos':
+        data_overrides['resolution'] = (args.frame_size, args.frame_size)
     _, _, data_loader, _, _ = load_data_and_data_loaders(
         dataset=args.dataset, batch_size=1, num_frames=frames_to_load, **data_overrides)
 

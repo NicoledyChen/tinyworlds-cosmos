@@ -15,6 +15,7 @@ cosmos_spatial_compression: 8
 dataset: PONG
 preload_ratio:
 device: mps # make sure to use correct device
+frame_size: 64
 generation_steps: 10
 context_window: 2
 fps: 2
