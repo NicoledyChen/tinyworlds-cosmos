@@ -88,10 +88,12 @@ def main():
         print("Compiled all models for inference.")
 
     # determine how many ground-truth frames we need in each batch: context + generation steps + prediction horizon
+    frame_step = args.prediction_horizon
     if tokenizer_backend == 'cosmos':
-        frames_to_load = args.context_window + args.generation_steps * args.prediction_horizon * args.cosmos_temporal_compression
+        frame_step *= args.cosmos_temporal_compression
+        frames_to_load = args.context_window + args.generation_steps * frame_step
     else:
-        frames_to_load = args.context_window + args.generation_steps * args.prediction_horizon
+        frames_to_load = args.context_window + args.generation_steps * frame_step
 
     # dataloader
     if hasattr(args, 'preload_ratio') and args.preload_ratio is not None:
@@ -119,20 +121,29 @@ def main():
         n_actions = latent_action_model.quantizer.codebook_size        
 
     # ensure we don’t exceed available GT frames if in teacher-forced mode
-    max_possible_steps = ground_truth_frames.shape[1] - args.context_window
+    max_possible_steps = (ground_truth_frames.shape[1] - args.context_window) // frame_step
     if args.teacher_forced and args.generation_steps > max_possible_steps:
         print(f"[WARN] Requested {args.generation_steps} generation steps but only {max_possible_steps} are possible with teacher-forced context. Clamping.")
     effective_steps = args.generation_steps if not args.teacher_forced else min(args.generation_steps, max_possible_steps)
+    if args.retain_full_context:
+        print("[INFO] Retaining full generated/teacher-forced history for dynamics context.")
 
     for i in range(effective_steps):
         print(f"Inferring frame {i+1}/{effective_steps}")
         # select context depending on teacher-forced flag
         if args.teacher_forced:
-            context_start = i  # shift window along ground truth
-            context_frames = ground_truth_frames[:, context_start:context_start+args.context_window, :, :, :] # [1, context_window, C, H, W]
+            if args.retain_full_context:
+                context_end = args.context_window + i * frame_step
+                context_frames = ground_truth_frames[:, :context_end, :, :, :]
+            else:
+                context_start = i * frame_step  # shift window along ground truth
+                context_frames = ground_truth_frames[:, context_start:context_start+args.context_window, :, :, :] # [1, context_window, C, H, W]
         else:
-            # autoregressive: last context_window frames from generated sequence
-            context_frames = generated_frames[:, -args.context_window:, :, :, :]  # [1, context_window, C, H, W]
+            if args.retain_full_context:
+                context_frames = generated_frames
+            else:
+                # autoregressive: last context_window frames from generated sequence
+                context_frames = generated_frames[:, -args.context_window:, :, :, :]  # [1, context_window, C, H, W]
 
         # encode context frames each iteration
         if tokenizer_backend == 'cosmos':

@@ -10,12 +10,18 @@ class DynamicsModel(nn.Module):
     def __init__(self, frame_size=(128, 128), patch_size=4, embed_dim=128, num_heads=8,
                  hidden_dim=128, num_blocks=4, num_bins=4, n_actions=8, conditioning_dim=3, latent_dim=5,
                  use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01,
-                 input_mode="fsq_latents", discrete_codebook_size=65536):
+                 input_mode="fsq_latents", discrete_codebook_size=65536,
+                 mask_strategy="random", target_token_steps=1):
         super().__init__()
         H, W = frame_size
         self.input_mode = input_mode
         self.latent_dim = latent_dim
         self.discrete_codebook_size = discrete_codebook_size
+        valid_mask_strategies = {"random", "target_block"}
+        if mask_strategy not in valid_mask_strategies:
+            raise ValueError(f"Unsupported mask_strategy: {mask_strategy}")
+        self.mask_strategy = mask_strategy
+        self.target_token_steps = max(1, int(target_token_steps))
         if input_mode == "fsq_latents":
             codebook_size = num_bins**latent_dim
             self.latent_embed = nn.Linear(latent_dim, embed_dim)
@@ -105,11 +111,22 @@ class DynamicsModel(nn.Module):
     def _sample_mask_positions(self, B, T, P, device):
         # per-batch mask ratio in [0.5, 1.0)
         mask_ratio = 0.5 + torch.rand((), device=device) * 0.5
+        if self.mask_strategy == "target_block":
+            mask_positions = torch.zeros(B, T, P, dtype=torch.bool, device=device)
+            target_steps = min(self.target_token_steps, T)
+            target_mask = torch.rand(B, target_steps, P, device=device) < mask_ratio
+            if not target_mask.any():
+                target_mask[0, -1, torch.randint(0, P, (), device=device)] = True
+            mask_positions[:, -target_steps:, :] = target_mask
+            return mask_positions
+
         mask_positions = (torch.rand(B, T, P, device=device) < mask_ratio) # [B, T, P]
 
         # guarantee at least one unmasked temporal anchor per (B, P)
         anchor_idx = torch.randint(0, T, (B, P), device=device)  # [B, P]
         mask_positions[torch.arange(B, device=device)[:, None], anchor_idx, torch.arange(P, device=device)[None, :]] = False # [B, T, P]
+        if not mask_positions.any():
+            mask_positions[0, torch.randint(0, T, (), device=device), torch.randint(0, P, (), device=device)] = True
         return mask_positions
 
     def exp_schedule_torch(self, t, T, P_total, k, device):

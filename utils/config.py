@@ -228,6 +228,8 @@ class DynamicsConfig:
 	cosmos_codebook_size: int = 65536
 	cosmos_temporal_compression: int = 8
 	cosmos_spatial_compression: int = 8
+	mask_strategy: str = "random"
+	target_token_steps: int = 1
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -295,6 +297,8 @@ class TrainingConfig:
 	cosmos_codebook_size: int = 65536
 	cosmos_temporal_compression: int = 8
 	cosmos_spatial_compression: int = 8
+	mask_strategy: str = "random"
+	target_token_steps: int = 1
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -332,6 +336,7 @@ class InferenceConfig:
 	cosmos_codebook_size: int = 65536
 	cosmos_temporal_compression: int = 8
 	cosmos_spatial_compression: int = 8
+	retain_full_context: bool = False
 
 
 def load_config(config_cls, default_config_path: Optional[str] = None):

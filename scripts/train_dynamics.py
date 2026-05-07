@@ -114,6 +114,8 @@ def main():
         moe_aux_loss_coeff=getattr(args, 'moe_aux_loss_coeff', 0.01),
         input_mode=getattr(args, 'input_mode', 'fsq_latents'),
         discrete_codebook_size=getattr(args, 'cosmos_codebook_size', 65536),
+        mask_strategy=getattr(args, 'mask_strategy', 'random'),
+        target_token_steps=getattr(args, 'target_token_steps', 1),
     ).to(args.device)
     if args.checkpoint:
         dynamics_model, _ = load_dynamics_from_checkpoint(
@@ -181,6 +183,13 @@ def main():
         **data_overrides,
     )
     train_iter = iter(training_loader)
+    if is_main:
+        print(
+            "Dynamics context:",
+            f"frames={args.context_length}",
+            f"mask_strategy={getattr(args, 'mask_strategy', 'random')}",
+            f"target_token_steps={getattr(args, 'target_token_steps', 1)}",
+        )
 
     use_moe = getattr(args, 'use_moe', False)
 

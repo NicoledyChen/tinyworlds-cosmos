@@ -21,6 +21,7 @@ fps: 2
 temperature: 0.5 # 0 is argmax
 teacher_forced: false # for testing/dev
 prediction_horizon: 1 # how many masked frames to append and decode at a time
+retain_full_context: false # if true, feed all generated/teacher-forced history instead of a sliding context window
 
 # action selection modes (lower takes priority)
 use_actions: false # use random actions
