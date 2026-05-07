@@ -1,0 +1,25 @@
+# Tuned dynamics config for Cosmos DV8x8x8 on 64x64 PicoDoom.
+batch_size_per_gpu: 256
+gradient_accumulation_steps: 1
+n_updates: 10000
+learning_rate: 0.001
+log_interval: 500
+
+use_actions: false
+tokenizer_backend: cosmos
+input_mode: token_indices
+cosmos_model: nvidia/Cosmos-0.1-Tokenizer-DV8x8x8
+cosmos_checkpoint_dir:
+cosmos_codebook_size: 65536
+cosmos_temporal_compression: 8
+cosmos_spatial_compression: 8
+
+embed_dim: 32
+num_heads: 8
+hidden_dim: 128
+num_blocks: 8
+
+video_tokenizer_path:
+latent_actions_path:
+
+checkpoint:
