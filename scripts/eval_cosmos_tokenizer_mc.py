@@ -22,6 +22,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Evaluate Cosmos tokenizer on Micro-World MC clips.")
     parser.add_argument("--dataset_name", default="amd/Micro-World-MC-Dataset")
     parser.add_argument("--split", default="train")
+    parser.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--frames_column", default=None)
     parser.add_argument("--max_samples", type=int, default=4)
     parser.add_argument("--frames_per_clip", type=int, default=9)
@@ -153,7 +154,7 @@ def save_comparison(original: torch.Tensor, reconstructed: torch.Tensor, path: s
     save_image(grid, path)
 
 
-def load_hf_dataset(dataset_name: str, split: str):
+def load_hf_dataset(dataset_name: str, split: str, streaming: bool):
     # The repository has a local package named "datasets", so temporarily remove
     # the repo root from sys.path before importing the Hugging Face package.
     repo_root = os.getcwd()
@@ -167,14 +168,14 @@ def load_hf_dataset(dataset_name: str, split: str):
     finally:
         for entry in reversed(removed):
             sys.path.insert(0, entry)
-    return load_dataset(dataset_name, split=split)
+    return load_dataset(dataset_name, split=split, streaming=streaming)
 
 
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    dataset = load_hf_dataset(args.dataset_name, args.split)
+    dataset = load_hf_dataset(args.dataset_name, args.split, args.streaming)
     adapter = CosmosTokenizerAdapter(
         model_name=args.cosmos_model,
         checkpoint_dir=args.cosmos_checkpoint_dir,
