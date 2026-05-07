@@ -34,6 +34,8 @@ def parse_args():
     parser.add_argument("--cosmos_model", default="nvidia/Cosmos-0.1-Tokenizer-DV8x8x8")
     parser.add_argument("--cosmos_checkpoint_dir", default=None)
     parser.add_argument("--cosmos_codebook_size", type=int, default=65536)
+    parser.add_argument("--temporal_compression", type=int, default=8)
+    parser.add_argument("--spatial_compression", type=int, default=8)
     return parser.parse_args()
 
 
@@ -206,6 +208,8 @@ def main():
         checkpoint_dir=args.cosmos_checkpoint_dir,
         device=args.device,
         codebook_size=args.cosmos_codebook_size,
+        temporal_compression=args.temporal_compression,
+        spatial_compression=args.spatial_compression,
     )
 
     rows = []
@@ -262,6 +266,8 @@ def main():
         "cosmos_model": args.cosmos_model,
         "resize": args.resize,
         "frames_per_clip": args.frames_per_clip,
+        "temporal_compression": args.temporal_compression,
+        "spatial_compression": args.spatial_compression,
         "clips": rows,
         "aggregate": aggregate,
     }
