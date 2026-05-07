@@ -23,6 +23,8 @@ def parse_args():
     parser.add_argument("--dataset_name", default="amd/Micro-World-MC-Dataset")
     parser.add_argument("--split", default="train")
     parser.add_argument("--streaming", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--use_hf_videos", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--video_prefix", default="video/")
     parser.add_argument("--frames_column", default=None)
     parser.add_argument("--max_samples", type=int, default=4)
     parser.add_argument("--frames_per_clip", type=int, default=9)
@@ -171,11 +173,34 @@ def load_hf_dataset(dataset_name: str, split: str, streaming: bool):
     return load_dataset(dataset_name, split=split, streaming=streaming)
 
 
+def load_hf_video_paths(dataset_name: str, video_prefix: str, max_samples: int) -> list[str]:
+    from huggingface_hub import HfApi, hf_hub_download
+
+    api = HfApi(token=os.environ.get("HF_TOKEN"))
+    files = api.list_repo_files(dataset_name, repo_type="dataset")
+    video_files = sorted(
+        f for f in files
+        if f.startswith(video_prefix) and f.lower().endswith((".mp4", ".avi", ".mov", ".mkv", ".webm"))
+    )
+    if not video_files:
+        raise RuntimeError(f"No video files found under prefix {video_prefix!r} in {dataset_name}.")
+    local_paths = []
+    for filename in video_files[:max_samples]:
+        local_paths.append(
+            hf_hub_download(
+                repo_id=dataset_name,
+                repo_type="dataset",
+                filename=filename,
+                token=os.environ.get("HF_TOKEN"),
+            )
+        )
+    return local_paths
+
+
 def main():
     args = parse_args()
     os.makedirs(args.out_dir, exist_ok=True)
 
-    dataset = load_hf_dataset(args.dataset_name, args.split, args.streaming)
     adapter = CosmosTokenizerAdapter(
         model_name=args.cosmos_model,
         checkpoint_dir=args.cosmos_checkpoint_dir,
@@ -184,7 +209,13 @@ def main():
     )
 
     rows = []
-    for sample_idx, sample in enumerate(dataset):
+    if args.use_hf_videos:
+        video_paths = load_hf_video_paths(args.dataset_name, args.video_prefix, args.max_samples)
+        iterable = [{"path": path} for path in video_paths]
+    else:
+        iterable = load_hf_dataset(args.dataset_name, args.split, args.streaming)
+
+    for sample_idx, sample in enumerate(iterable):
         if len(rows) >= args.max_samples:
             break
         clip = extract_clip(sample, args.frames_column, args.frames_per_clip, args.resize)
