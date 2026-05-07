@@ -6,10 +6,12 @@
 - Local commits:
   - `050e426` Add retained-context Cosmos dynamics controls.
   - `b7cc2e0` Set Cosmos inference frame size.
+  - `4aca3da` Record retained-context Cosmos experiment summary.
 - Remote branch: `retained-context-cosmos`
 - Remote commits:
   - `8d3361d` Add retained-context Cosmos dynamics controls.
   - `2fc5790` Set Cosmos inference frame size.
+  - `301db7f` Record retained-context Cosmos experiment summary.
 
 ## Tuned sliding baseline
 
