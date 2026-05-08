@@ -253,6 +253,7 @@ class ZeldaDataset(VideoHDF5Dataset):
 
 class MicroWorldMCDataset(VideoHDF5Dataset):
     def __init__(self, video_path, transform=None, save_path=None, train=True, num_frames=9, resolution=(256, 256), fps=30, preload_ratio=1):
+        lazy_load = os.environ.get("TW_LAZY_H5", "0") == "1"
         super().__init__(
             video_path=video_path,
             transform=transform,
@@ -267,5 +268,5 @@ class MicroWorldMCDataset(VideoHDF5Dataset):
             load_start_index=0,
             preprocess_read_step=1,
             preprocess_slice=None,
-            lazy_load_h5=True,
+            lazy_load_h5=lazy_load,
         )
