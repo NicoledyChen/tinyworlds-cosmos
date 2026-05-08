@@ -36,7 +36,12 @@ def init_distributed_from_env() -> Dict[str, object]:
 
 def prepare_model_for_distributed(model: torch.nn.Module, config: DistributedConfig, model_type: ModelType, device_mesh: DeviceMesh) -> torch.nn.Module:
     if config.use_ddp:
-        return DDP(model, device_ids=[device_mesh.get_local_rank()], output_device=device_mesh.get_local_rank(), find_unused_parameters=False)
+        return DDP(
+            model,
+            device_ids=[device_mesh.get_local_rank()],
+            output_device=device_mesh.get_local_rank(),
+            find_unused_parameters=getattr(config, 'find_unused_parameters', False),
+        )
     if config.use_fsdp:
         mp_policy = config.get_mixed_precision_policy()
         fsdp_kwargs = {

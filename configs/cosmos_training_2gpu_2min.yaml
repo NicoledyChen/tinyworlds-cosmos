@@ -33,6 +33,7 @@ distributed:
   use_ddp: true
   use_fsdp: false
   reshard_after_forward: false
+  find_unused_parameters: true
 nproc_per_node: 2
 standalone: true
 

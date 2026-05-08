@@ -42,6 +42,7 @@ class DistributedConfig:
 	use_ddp: bool = False
 	use_fsdp: bool = False
 	reshard_after_forward: bool = False
+	find_unused_parameters: bool = False
 	fsdp_mixed_precision: FSDPMixedPrecisionConfig | None = field(default_factory=FSDPMixedPrecisionConfig)
 	offload_policy: CPUOffloadPolicy | None = None
 
