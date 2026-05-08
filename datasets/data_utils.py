@@ -184,7 +184,10 @@ def load_data_and_data_loaders(dataset, batch_size, num_frames=1, distributed=Fa
         training_data, validation_data, batch_size,
         distributed=distributed, rank=rank, world_size=world_size
     )
-    x_train_var = np.var(training_data.data)
+    if getattr(training_data, 'data', None) is None:
+        x_train_var = 0.0
+    else:
+        x_train_var = np.var(training_data.data)
 
     return training_data, validation_data, training_loader, validation_loader, x_train_var
 

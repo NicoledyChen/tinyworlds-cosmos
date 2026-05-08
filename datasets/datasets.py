@@ -26,6 +26,7 @@ class VideoHDF5Dataset(Dataset):
         preload_ratio: Optional[float] = None, # if set, only load this ratio of cached frames
         preprocess_read_step: int = 1, # step to subsample raw video during preprocessing
         preprocess_slice: Optional[Tuple[Union[int, float], Union[int, float]]] = None, # optional slice applied to preprocessed frames; can be (start_idx, end_idx) ints or (start_ratio, end_ratio) floats in [0,1]
+        lazy_load_h5: bool = False,
     ) -> None:
         self.transform = transform
         self.train = train
@@ -34,6 +35,11 @@ class VideoHDF5Dataset(Dataset):
         self.frame_skip = max(1, (sequence_stride if sequence_stride is not None else max(1, 60 // fps)))
         self.fraction_of_dataset = float(fraction_of_dataset)
         self.resize_to = resize_to
+        self.lazy_load_h5 = lazy_load_h5
+        self.h5_path = None
+        self.h5_file = None
+        self.data = None
+        self.total_frames = 0
 
         if save_path and os.path.exists(save_path):
             with h5py.File(save_path, 'r') as h5_file:
@@ -41,11 +47,17 @@ class VideoHDF5Dataset(Dataset):
                 total = len(frames_dset)
                 n_frames = int(total if preload_ratio is None else max(0, min(total, int(total * preload_ratio))))
 
-                self.data = []
-                for i in tqdm(range(load_start_index, n_frames, load_chunk_size), desc=f"Loading {n_frames} frames"):
-                    chunk = frames_dset[i:min(i + load_chunk_size, n_frames)][:]
-                    self.data.extend(chunk)
-                self.data = np.array(self.data)
+                self.total_frames = max(0, n_frames - load_start_index)
+                if lazy_load_h5:
+                    self.h5_path = save_path
+                    self.load_start_index = load_start_index
+                else:
+                    self.data = []
+                    for i in tqdm(range(load_start_index, n_frames, load_chunk_size), desc=f"Loading {n_frames} frames"):
+                        chunk = frames_dset[i:min(i + load_chunk_size, n_frames)][:]
+                        self.data.extend(chunk)
+                    self.data = np.array(self.data)
+                    self.total_frames = len(self.data)
         else:
             frames = self._preprocess_video(
                 video_path=video_path,
@@ -63,10 +75,14 @@ class VideoHDF5Dataset(Dataset):
                     frames = h5_file['frames'][:]
 
             self.data = frames
+            self.total_frames = len(self.data)
 
         if not disable_test_split:
-            split_idx = int(0.9 * len(self.data))
+            split_idx = int(0.9 * self.total_frames)
+            if self.lazy_load_h5:
+                raise ValueError("lazy_load_h5 does not currently support train/validation splitting.")
             self.data = self.data[:split_idx] if train else self.data[split_idx:]
+            self.total_frames = len(self.data)
 
     def _preprocess_video(
         self,
@@ -110,14 +126,21 @@ class VideoHDF5Dataset(Dataset):
         return frames
 
     def __len__(self) -> int:
-        max_valid_index = int((len(self.data) - (self.num_frames * self.frame_skip)) * self.fraction_of_dataset)
+        max_valid_index = int((self.total_frames - (self.num_frames * self.frame_skip)) * self.fraction_of_dataset)
         return max(0, max_valid_index)
 
     def __getitem__(self, index: int):
         if index >= len(self):
             raise IndexError(f"Index {index} out of bounds for dataset of length {len(self)}")
 
-        frame_sequence = self.data[index:index + (self.num_frames * self.frame_skip):self.frame_skip]
+        if self.lazy_load_h5:
+            if self.h5_file is None:
+                self.h5_file = h5py.File(self.h5_path, 'r')
+            start = self.load_start_index + index
+            stop = start + (self.num_frames * self.frame_skip)
+            frame_sequence = self.h5_file['frames'][start:stop:self.frame_skip]
+        else:
+            frame_sequence = self.data[index:index + (self.num_frames * self.frame_skip):self.frame_skip]
         if len(frame_sequence) != self.num_frames:
             raise ValueError(f"Expected {self.num_frames} frames, got {len(frame_sequence)} frames")
 
@@ -244,4 +267,5 @@ class MicroWorldMCDataset(VideoHDF5Dataset):
             load_start_index=0,
             preprocess_read_step=1,
             preprocess_slice=None,
+            lazy_load_h5=True,
         )
