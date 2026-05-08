@@ -232,6 +232,11 @@ class DynamicsConfig:
 	mask_strategy: str = "random"
 	target_token_steps: int = 1
 	use_temporal_rope: bool = False
+	action_backend: str = "tinyworlds"
+	olaf_lam_root: Optional[str] = None
+	olaf_lam_checkpoint: Optional[str] = None
+	olaf_lam_variant: str = "align"
+	olaf_lam_dim: int = 32
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -302,6 +307,11 @@ class TrainingConfig:
 	mask_strategy: str = "random"
 	target_token_steps: int = 1
 	use_temporal_rope: bool = False
+	action_backend: str = "tinyworlds"
+	olaf_lam_root: Optional[str] = None
+	olaf_lam_checkpoint: Optional[str] = None
+	olaf_lam_variant: str = "align"
+	olaf_lam_dim: int = 32
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)

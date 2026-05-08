@@ -5,6 +5,7 @@ from tqdm import tqdm
 from einops import rearrange
 from models.dynamics import DynamicsModel
 from models.cosmos_tokenizer_adapter import CosmosTokenizerAdapter, CosmosVideoShape
+from models.olaf_lam_adapter import OlafLAMAdapter
 from datasets.data_utils import visualize_reconstruction, load_data_and_data_loaders
 from tqdm import tqdm
 from einops import rearrange
@@ -62,6 +63,8 @@ def main():
     video_tokenizer = None
     cosmos_tokenizer = None
 
+    action_backend = getattr(args, 'action_backend', 'tinyworlds')
+
     # load video tokenizer and optional latent action model
     if tokenizer_backend == 'cosmos':
         cosmos_tokenizer = CosmosTokenizerAdapter(
@@ -84,7 +87,14 @@ def main():
     else:
         raise FileNotFoundError(f"Video tokenizer checkpoint not found at {args.video_tokenizer_path}")
     latent_action_model = None
-    if args.use_actions and os.path.isdir(args.latent_actions_path):
+    if args.use_actions and action_backend == 'olaf':
+        latent_action_model = OlafLAMAdapter(
+            checkpoint_path=args.olaf_lam_checkpoint,
+            olaf_root=args.olaf_lam_root,
+            variant=getattr(args, 'olaf_lam_variant', 'align'),
+            device=args.device,
+        )
+    elif args.use_actions and os.path.isdir(args.latent_actions_path):
         latent_action_model, latent_action_ckpt = load_latent_actions_from_checkpoint(
             checkpoint_path=args.latent_actions_path, 
             device=args.device,
@@ -97,7 +107,12 @@ def main():
         raise FileNotFoundError(f"Latent Action Model checkpoint not found at {args.latent_actions_path}")
 
     # init dynamics model and optional ckpt load
-    conditioning_dim = unwrap_model(latent_action_model).action_dim if latent_action_model is not None else 3
+    if latent_action_model is None:
+        conditioning_dim = 3
+    elif action_backend == 'olaf':
+        conditioning_dim = getattr(args, 'olaf_lam_dim', 32)
+    else:
+        conditioning_dim = unwrap_model(latent_action_model).action_dim
     dynamics_model = DynamicsModel(
         frame_size=(args.frame_size, args.frame_size),
         patch_size=args.patch_size,
@@ -131,7 +146,7 @@ def main():
     if args.compile:
         if video_tokenizer is not None:
             video_tokenizer = torch.compile(video_tokenizer, mode="reduce-overhead", fullgraph=False, dynamic=True)
-        if latent_action_model is not None:
+        if latent_action_model is not None and action_backend != 'olaf':
             latent_action_model = torch.compile(latent_action_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         dynamics_model = torch.compile(dynamics_model, mode="reduce-overhead", fullgraph=False, dynamic=True)
         print("Compiled all models for training.")
@@ -273,7 +288,7 @@ def main():
             wandb.log(log_dict, step=i)
             log_system_metrics(i)
             log_learning_rate(optimizers[0], i)
-            if args.use_actions and latent_action_model is not None and quantized_actions is not None:
+            if args.use_actions and action_backend != 'olaf' and latent_action_model is not None and quantized_actions is not None:
                 action_indices = latent_action_model.quantizer.get_indices_from_latents(quantized_actions)
                 log_action_distribution(action_indices, i, args.n_actions)
 
