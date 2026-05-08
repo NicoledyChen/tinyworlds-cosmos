@@ -79,8 +79,7 @@ def visualize_inference(predicted_frames, ground_truth_frames, inferred_actions,
     
     print(f"Visualization saved to: {save_path}")
 
-    all_frames = torch.cat([ground_truth_frames, predicted_frames], dim=1)
-    save_frames_as_mp4(all_frames, mp4_path, fps)
+    save_side_by_side_as_mp4(ground_truth_frames, predicted_frames, mp4_path, fps)
     
     # Calculate and display reconstruction error
     mse_error = torch.mean((predicted_frames - ground_truth_frames) ** 2).item()
@@ -93,13 +92,14 @@ def visualize_inference(predicted_frames, ground_truth_frames, inferred_actions,
         print(f"No actions used.")
 
 
-# TODO: get working mp4
 def save_frames_as_mp4(frames, output_path, fps=2):
     B, T, C, H, W = frames.shape
 
     # OpenCV expects (W, H)
-    fourcc = cv2.VideoWriter_fourcc(*'avc1')
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     out = cv2.VideoWriter(output_path, fourcc, fps, (W, H))
+    if not out.isOpened():
+        raise RuntimeError(f"Could not open MP4 writer for {output_path}")
 
     for i in range(T):
         frame = frames[0, i].detach().cpu().permute(1, 2, 0).numpy()  # [H, W, C]
@@ -117,6 +117,40 @@ def save_frames_as_mp4(frames, output_path, fps=2):
 
     out.release()
     print(f"MP4 video saved to: {output_path}")
+
+
+def save_side_by_side_as_mp4(ground_truth_frames, predicted_frames, output_path, fps=2):
+    # Save a more useful rollout video: ground truth on the left, model output on the right.
+    ground_truth_frames = torch.clamp(ground_truth_frames, 0, 1)
+    predicted_frames = torch.clamp(predicted_frames, 0, 1)
+    _, gt_len, C, H, W = ground_truth_frames.shape
+    _, pred_len, _, _, _ = predicted_frames.shape
+    total = max(gt_len, pred_len)
+
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_path, fourcc, fps, (W * 2, H))
+    if not out.isOpened():
+        raise RuntimeError(f"Could not open MP4 writer for {output_path}")
+
+    blank = np.zeros((H, W, C), dtype=np.uint8)
+    for i in range(total):
+        if i < gt_len:
+            left = ground_truth_frames[0, i].detach().cpu().permute(1, 2, 0).numpy()
+            left = (np.clip(left, 0, 1) * 255).astype(np.uint8)
+        else:
+            left = blank
+        if i < pred_len:
+            right = predicted_frames[0, i].detach().cpu().permute(1, 2, 0).numpy()
+            right = (np.clip(right, 0, 1) * 255).astype(np.uint8)
+        else:
+            right = blank
+        frame = np.concatenate([left, right], axis=1)
+        if C == 1:
+            frame = np.repeat(frame, 3, axis=2)
+        out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+    out.release()
+    print(f"Side-by-side MP4 video saved to: {output_path}")
 
 
 def sample_random_action(n_actions):
