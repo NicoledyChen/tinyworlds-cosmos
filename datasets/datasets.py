@@ -158,7 +158,7 @@ class VideoHDF5Dataset(Dataset):
         return frame_sequence, 0
 
     def __del__(self):
-        if hasattr(self, 'h5_file'):
+        if hasattr(self, 'h5_file') and self.h5_file is not None:
             self.h5_file.close() 
 
 # TODO: add more datasets
