@@ -1,0 +1,54 @@
+# Two-minute retained-context training config for TinyWorlds dynamics with Cosmos DV8x8x8 tokens.
+use_wandb: false
+wandb_project: tinyworlds
+
+dataset: PICODOOM
+preload_ratio: 1.0
+
+patch_size: 8
+# 3601 frames at 30 FPS is 120 seconds plus the causal tokenizer anchor frame.
+# Cosmos DV8 maps this to 451 latent time steps: 450 clean-history steps + 1 target block.
+context_length: 3601
+frame_size: 64
+latent_dim: 5
+num_bins: 4
+n_actions: 4
+
+tokenizer_backend: cosmos
+input_mode: token_indices
+cosmos_model: nvidia/Cosmos-0.1-Tokenizer-DV8x8x8
+cosmos_checkpoint_dir:
+cosmos_codebook_size: 65536
+cosmos_temporal_compression: 8
+cosmos_spatial_compression: 8
+
+mask_strategy: target_block
+target_token_steps: 1
+
+amp: true
+tf32: true
+compile: false
+
+distributed:
+  use_ddp: false
+  use_fsdp: false
+  reshard_after_forward: false
+nproc_per_node: 1
+standalone: true
+
+video_tokenizer_config: configs/video_tokenizer.yaml
+latent_actions_config: configs/latent_actions.yaml
+dynamics_config: configs/cosmos_dynamics_retained_2min.yaml
+
+run_video_tokenizer: false
+run_latent_actions: false
+run_dynamics: true
+
+optimizer: adamw
+muon_momentum: 0.95
+muon_backend_steps: 5
+
+use_moe: false
+num_experts: 4
+top_k_experts: 2
+moe_aux_loss_coeff: 0.01
