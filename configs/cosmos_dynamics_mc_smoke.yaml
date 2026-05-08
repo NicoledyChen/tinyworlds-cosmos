@@ -15,6 +15,7 @@ cosmos_spatial_compression: 8
 
 mask_strategy: random
 target_token_steps: 1
+use_temporal_rope: true
 
 embed_dim: 32
 num_heads: 8

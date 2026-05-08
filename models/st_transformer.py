@@ -7,6 +7,30 @@ from models.patch_embed import PatchEmbedding
 import math
 import torch.nn.functional as F
 
+
+def apply_temporal_rope(q, k):
+    # q/k: [(B*P), H, T, D]
+    D = q.shape[-1]
+    if D % 2 != 0:
+        raise ValueError(f"RoPE requires an even head dimension, got {D}")
+    T = q.shape[-2]
+    pos = torch.arange(T, device=q.device, dtype=torch.float32)
+    inv_freq = torch.pow(
+        torch.tensor(10000.0, device=q.device, dtype=torch.float32),
+        -torch.arange(0, D, 2, device=q.device, dtype=torch.float32) / D,
+    )
+    freqs = torch.outer(pos, inv_freq).to(dtype=q.dtype)  # [T, D/2]
+    cos = freqs.cos()[None, None, :, :]
+    sin = freqs.sin()[None, None, :, :]
+
+    def rotate(x):
+        even = x[..., 0::2]
+        odd = x[..., 1::2]
+        rotated = torch.stack([even * cos - odd * sin, even * sin + odd * cos], dim=-1)
+        return rotated.flatten(-2)
+
+    return rotate(q), rotate(k)
+
 class SpatialAttention(nn.Module):
     def __init__(self, embed_dim, num_heads, conditioning_dim=None):
         super().__init__()
@@ -48,7 +72,7 @@ class SpatialAttention(nn.Module):
         return out # [B, T, P, E]
 
 class TemporalAttention(nn.Module):
-    def __init__(self, embed_dim, num_heads, causal=True, conditioning_dim=None):
+    def __init__(self, embed_dim, num_heads, causal=True, conditioning_dim=None, use_rope=False):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -62,6 +86,9 @@ class TemporalAttention(nn.Module):
         
         self.norm = AdaptiveNormalizer(embed_dim, conditioning_dim)
         self.causal = causal
+        self.use_rope = use_rope
+        if self.use_rope and self.head_dim % 2 != 0:
+            raise ValueError(f"RoPE requires an even head dimension, got {self.head_dim}")
         
     def forward(self, x, conditioning=None):
         B, T, P, E = x.shape
@@ -71,6 +98,8 @@ class TemporalAttention(nn.Module):
         q = rearrange(self.q_proj(x), 'b t p (h d) -> (b p) h t d', h=self.num_heads)
         k = rearrange(self.k_proj(x), 'b t p (h d) -> (b p) h t d', h=self.num_heads)
         v = rearrange(self.v_proj(x), 'b t p (h d) -> (b p) h t d', h=self.num_heads) # [B, P, H, T, D]
+        if self.use_rope:
+            q, k = apply_temporal_rope(q, k)
 
         k_t = k.transpose(-2, -1) # [(B*P), H, T, D, T]
 
@@ -200,10 +229,11 @@ class MoESwiGLUFFN(nn.Module):
 
 class STTransformerBlock(nn.Module):
     def __init__(self, embed_dim, num_heads, hidden_dim, causal=True, conditioning_dim=None,
-                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01):
+                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01,
+                 use_temporal_rope=False):
         super().__init__()
         self.spatial_attn = SpatialAttention(embed_dim, num_heads, conditioning_dim)
-        self.temporal_attn = TemporalAttention(embed_dim, num_heads, causal, conditioning_dim)
+        self.temporal_attn = TemporalAttention(embed_dim, num_heads, causal, conditioning_dim, use_rope=use_temporal_rope)
         if use_moe:
             self.ffn = MoESwiGLUFFN(
                 embed_dim, hidden_dim,
@@ -224,17 +254,20 @@ class STTransformerBlock(nn.Module):
 
 class STTransformer(nn.Module):
     def __init__(self, embed_dim, num_heads, hidden_dim, num_blocks, causal=True, conditioning_dim=None,
-                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01):
+                 use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01,
+                 use_temporal_rope=False):
         super().__init__()
         # calculate temporal PE dim
         self.temporal_dim = (embed_dim // 3) & ~1  # round down to even number
         self.spatial_dims = embed_dim - self.temporal_dim  # rest goes to spatial
+        self.use_temporal_rope = use_temporal_rope
 
         self.blocks = nn.ModuleList([
             STTransformerBlock(
                 embed_dim, num_heads, hidden_dim, causal, conditioning_dim,
                 use_moe=use_moe, num_experts=num_experts,
                 top_k_experts=top_k_experts, moe_aux_loss_coeff=moe_aux_loss_coeff,
+                use_temporal_rope=use_temporal_rope,
             )
             for _ in range(num_blocks)
         ])
@@ -243,14 +276,15 @@ class STTransformer(nn.Module):
         # x: [B, T, P, E]
         # conditioning: [B, T, E]
         B, T, P, E = x.shape
-        tpe = sincos_time(T, self.temporal_dim, x.device, x.dtype)  # [T, E/3]
+        if not self.use_temporal_rope:
+            tpe = sincos_time(T, self.temporal_dim, x.device, x.dtype)  # [T, E/3]
 
-        # temporal PE (pad with 0s for first 2/3s spatial PE, last 1/3 temporal PE)
-        tpe_padded = torch.cat([
-            torch.zeros(T, self.spatial_dims, device=x.device, dtype=x.dtype),
-            tpe
-        ], dim=-1)  # [T, E]
-        x = x + tpe_padded[None, :, None, :]  # [B,T,P,E]
+            # temporal PE (pad with 0s for first 2/3s spatial PE, last 1/3 temporal PE)
+            tpe_padded = torch.cat([
+                torch.zeros(T, self.spatial_dims, device=x.device, dtype=x.dtype),
+                tpe
+            ], dim=-1)  # [T, E]
+            x = x + tpe_padded[None, :, None, :]  # [B,T,P,E]
 
         # apply transformer blocks
         for block in self.blocks:

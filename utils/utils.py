@@ -297,6 +297,9 @@ def load_dynamics_from_checkpoint(checkpoint_path, device, model = None, is_dist
         'moe_aux_loss_coeff': cfg.get('moe_aux_loss_coeff', 0.01),
         'input_mode': cfg.get('input_mode', 'fsq_latents'),
         'discrete_codebook_size': cfg.get('cosmos_codebook_size', cfg.get('discrete_codebook_size', 65536)),
+        'mask_strategy': cfg.get('mask_strategy', 'random'),
+        'target_token_steps': cfg.get('target_token_steps', 1),
+        'use_temporal_rope': cfg.get('use_temporal_rope', False),
     }
     if model is None:
         model = DynamicsModel(**kwargs)

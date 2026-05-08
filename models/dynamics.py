@@ -11,7 +11,7 @@ class DynamicsModel(nn.Module):
                  hidden_dim=128, num_blocks=4, num_bins=4, n_actions=8, conditioning_dim=3, latent_dim=5,
                  use_moe=False, num_experts=4, top_k_experts=2, moe_aux_loss_coeff=0.01,
                  input_mode="fsq_latents", discrete_codebook_size=65536,
-                 mask_strategy="random", target_token_steps=1):
+                 mask_strategy="random", target_token_steps=1, use_temporal_rope=False):
         super().__init__()
         H, W = frame_size
         self.input_mode = input_mode
@@ -43,6 +43,7 @@ class DynamicsModel(nn.Module):
             conditioning_dim=conditioning_dim,
             use_moe=use_moe, num_experts=num_experts,
             top_k_experts=top_k_experts, moe_aux_loss_coeff=moe_aux_loss_coeff,
+            use_temporal_rope=use_temporal_rope,
         )
         self.output_mlp = nn.Linear(embed_dim, codebook_size)
 

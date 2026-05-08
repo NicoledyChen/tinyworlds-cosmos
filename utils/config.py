@@ -231,6 +231,7 @@ class DynamicsConfig:
 	cosmos_spatial_compression: int = 8
 	mask_strategy: str = "random"
 	target_token_steps: int = 1
+	use_temporal_rope: bool = False
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)
@@ -300,6 +301,7 @@ class TrainingConfig:
 	cosmos_spatial_compression: int = 8
 	mask_strategy: str = "random"
 	target_token_steps: int = 1
+	use_temporal_rope: bool = False
 	
 	def __post_init__(self) -> None:
 		_validate_amp_fsdp(self.amp, self.distributed)

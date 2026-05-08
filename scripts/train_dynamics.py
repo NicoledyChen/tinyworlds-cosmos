@@ -116,6 +116,7 @@ def main():
         discrete_codebook_size=getattr(args, 'cosmos_codebook_size', 65536),
         mask_strategy=getattr(args, 'mask_strategy', 'random'),
         target_token_steps=getattr(args, 'target_token_steps', 1),
+        use_temporal_rope=getattr(args, 'use_temporal_rope', False),
     ).to(args.device)
     if args.checkpoint:
         dynamics_model, _ = load_dynamics_from_checkpoint(
