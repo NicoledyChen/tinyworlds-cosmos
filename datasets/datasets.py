@@ -227,3 +227,21 @@ class ZeldaDataset(VideoHDF5Dataset):
             preprocess_read_step=1,
             preprocess_slice=None,
         )
+
+class MicroWorldMCDataset(VideoHDF5Dataset):
+    def __init__(self, video_path, transform=None, save_path=None, train=True, num_frames=9, resolution=(256, 256), fps=30, preload_ratio=1):
+        super().__init__(
+            video_path=video_path,
+            transform=transform,
+            save_path=save_path,
+            train=train,
+            num_frames=num_frames,
+            resize_to=resolution,
+            fps=fps,
+            preload_ratio=preload_ratio,
+            sequence_stride=None,
+            load_chunk_size=1000,
+            load_start_index=0,
+            preprocess_read_step=1,
+            preprocess_slice=None,
+        )
